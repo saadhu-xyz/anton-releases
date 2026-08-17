@@ -1,0 +1,21 @@
+# Build artifacts belong on GitHub Releases, never in git history.
+# A committed 83 MB APK is permanent — it stays in every clone forever.
+*.apk
+*.dmg
+*.tar.gz
+*.tgz
+*.zip
+SHA256SUMS
+
+# Local staging area for artifacts being prepared for a release
+artifacts/
+dist/
+
+# macOS
+.DS_Store
+._*
+
+# Editors
+.vscode/
+.idea/
+*.swp
