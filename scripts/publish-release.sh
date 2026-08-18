@@ -2,85 +2,86 @@
 # Publish an Anton release: checksum the artifacts, create the tag + release,
 # and upload everything as release assets.
 #
-# Each artifact is passed behind a flag naming the platform it's for. The flag
-# decides the published filename, so you can hand it build output under whatever
-# name the toolchain produced:
+# Each artifact is passed with the target OS it was built for. The target decides
+# the published filename, so you can hand it build output under whatever name the
+# toolchain produced:
 #
 #   ./scripts/publish-release.sh v1.0.1 \
-#       --android     ../anton/mobile/build/app/outputs/flutter-apk/app-release.apk \
-#       --macos-arm64 ../anton/packaging/macos/dist/Anton-arm64.dmg
+#       --targetos android     ../anton/mobile/build/app/outputs/flutter-apk/app-release.apk \
+#       --targetos macos-arm64 ../anton/packaging/macos/dist/Anton-arm64.dmg
 #
 # Requires the `gh` CLI, authenticated with write access to this repo.
 set -euo pipefail
 
 REPO="saadhu-xyz/anton-releases"
 
-# Platform flag -> the filename the website links to via `latest/download/<name>`.
+# Target OS -> the filename the website links to via `latest/download/<name>`.
 # These names are load-bearing; changing one breaks the site's download button.
-platform_asset() {
+target_asset() {
   case "$1" in
-    --android)     echo "anton.apk" ;;
-    --ios)         echo "anton.ipa" ;;
-    --macos-arm64) echo "Anton-arm64.dmg" ;;
-    --macos-intel) echo "Anton-x86_64.dmg" ;;
-    --linux-x86)   echo "anton-linux-amd64.tar.gz" ;;
-    *)             return 1 ;;
+    android)     echo "anton.apk" ;;
+    ios)         echo "anton.ipa" ;;
+    macos-arm64) echo "Anton-arm64.dmg" ;;
+    macos-intel) echo "Anton-x86_64.dmg" ;;
+    linux-x86)   echo "anton-linux-amd64.tar.gz" ;;
+    *)           return 1 ;;
   esac
 }
 
-PLATFORMS="--android --ios --macos-arm64 --macos-intel --linux-x86"
+TARGETS="android ios macos-arm64 macos-intel linux-x86"
 
 die() { echo "error: $*" >&2; exit 1; }
 
 usage() {
   cat >&2 <<EOF
-usage: $0 <tag> --<platform> <file> [--<platform> <file>...]
+usage: $0 <tag> --targetos <os> <file> [--targetos <os> <file>...]
 
-platforms:
-  --android      <file>   published as anton.apk
-  --ios          <file>   published as anton.ipa
-  --macos-arm64  <file>   published as Anton-arm64.dmg
-  --macos-intel  <file>   published as Anton-x86_64.dmg
-  --linux-x86    <file>   published as anton-linux-amd64.tar.gz
+target os values:
+  android       published as anton.apk
+  ios           published as anton.ipa
+  macos-arm64   published as Anton-arm64.dmg
+  macos-intel   published as Anton-x86_64.dmg
+  linux-x86     published as anton-linux-amd64.tar.gz
 
 example:
-  $0 v1.0.1 --android ../anton/mobile/build/app/outputs/flutter-apk/app-release.apk
+  $0 v1.0.1 --targetos android ../anton/mobile/build/app/outputs/flutter-apk/app-release.apk
 EOF
   exit 1
 }
 
-[[ $# -ge 3 ]] || usage
+[[ $# -ge 1 ]] || usage
+case "$1" in --help|-h) usage ;; esac
+[[ $# -ge 4 ]] || usage
 
 TAG="$1"; shift
 [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]] || die "tag must look like v1.2.3 (got: $TAG)"
 
-# Parse --platform/file pairs.
-FLAGS=(); FILES=(); ASSETS=()
+# Parse repeated `--targetos <os> <file>` triples.
+OSES=(); FILES=(); ASSETS=()
 while [[ $# -gt 0 ]]; do
-  flag="$1"
-  case "$flag" in
-    --help|-h) usage ;;
-    --*) ;;
-    *) die "expected a platform flag, got '$flag'. One of: $PLATFORMS" ;;
+  case "$1" in
+    --help|-h)  usage ;;
+    --targetos) ;;
+    *)          die "expected --targetos, got '$1'" ;;
   esac
 
-  asset=$(platform_asset "$flag") || die "unknown platform flag '$flag'. One of: $PLATFORMS"
+  [[ $# -ge 3 ]] || die "--targetos needs an os and a file path"
+  os="$2"; file="$3"; shift 3
 
-  [[ $# -ge 2 ]] || die "$flag needs a file path"
-  file="$2"; shift 2
+  asset=$(target_asset "$os") || die "unknown target os '$os'. One of: $TARGETS"
 
-  [[ "$file" != --* ]] || die "$flag needs a file path, got flag '$file'"
+  [[ "$file" != --* ]] || die "--targetos $os needs a file path, got flag '$file'"
   [[ -f "$file" ]]     || die "not a file: $file"
   [[ -s "$file" ]]     || die "empty file: $file"
 
-  for seen in ${FLAGS[@]+"${FLAGS[@]}"}; do
-    [[ "$seen" == "$flag" ]] && die "$flag given twice — one file per platform"
+  for seen in ${OSES[@]+"${OSES[@]}"}; do
+    [[ "$seen" == "$os" ]] && die "--targetos $os given twice — one file per target"
   done
 
-  FLAGS+=("$flag"); FILES+=("$file"); ASSETS+=("$asset")
+  OSES+=("$os"); FILES+=("$file"); ASSETS+=("$asset")
 done
 
-[[ ${#FILES[@]} -gt 0 ]] || die "no artifacts given. Platforms: $PLATFORMS"
+[[ ${#FILES[@]} -gt 0 ]] || die "no artifacts given. Target os values: $TARGETS"
 
 command -v gh >/dev/null || die "gh CLI not found — https://cli.github.com"
 gh auth status >/dev/null 2>&1 || die "gh is not authenticated; run: gh auth login"
@@ -96,8 +97,8 @@ trap 'rm -rf "$STAGE"' EXIT
 echo "Staging artifacts…"
 for i in "${!FILES[@]}"; do
   cp "${FILES[$i]}" "$STAGE/${ASSETS[$i]}"
-  printf '  %-14s %-26s %s\n' \
-    "${FLAGS[$i]}" "${ASSETS[$i]}" "$(du -h "${FILES[$i]}" | cut -f1)"
+  printf '  %-13s %-26s %s\n' \
+    "${OSES[$i]}" "${ASSETS[$i]}" "$(du -h "${FILES[$i]}" | cut -f1)"
 done
 
 echo "Computing checksums…"
