@@ -71,18 +71,30 @@ sudo install anton anton-ticketing anton-impl-server /usr/local/bin/
 
 ## Publishing a release
 
-From a checkout of this repo, with the built artifacts on hand:
+From a checkout of this repo, pass each artifact behind the flag for its
+platform. The flag decides the published filename, so build output can be handed
+over under whatever name the toolchain produced:
 
 ```sh
 ./scripts/publish-release.sh v1.0.1 \
-  ../anton/mobile/build/app/outputs/flutter-apk/app-release.apk
+  --android     ../anton/mobile/build/app/outputs/flutter-apk/app-release.apk \
+  --macos-arm64 ../anton/packaging/macos/dist/Anton-arm64.dmg \
+  --macos-intel ../anton/packaging/macos/dist/Anton-x86_64.dmg
 ```
 
-Pass build outputs under whatever name the toolchain gave them — Flutter's
-`app-release.apk` is renamed to `anton.apk` on the way in, so the site's
-`latest/download/anton.apk` link keeps resolving. The script also refuses to
-clobber an existing tag, rejects two artifacts that would collide on one asset
-name, warns if a filename isn't one the website links to, and generates
-`SHA256SUMS`.
+| Flag | Published as |
+|---|---|
+| `--android` | `anton.apk` |
+| `--ios` | `anton.ipa` |
+| `--macos-arm64` | `Anton-arm64.dmg` |
+| `--macos-intel` | `Anton-x86_64.dmg` |
+| `--linux-x86` | `anton-linux-amd64.tar.gz` |
+
+Include only the platforms you built — a release with just `--android` is fine,
+and the other `latest/download` links keep pointing at whichever earlier release
+last published them.
+
+The script refuses to clobber an existing tag, rejects a platform given twice,
+and generates `SHA256SUMS` across everything it uploads.
 
 Requires the `gh` CLI, authenticated as an account with write access here.
