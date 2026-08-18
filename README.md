@@ -18,7 +18,6 @@ Always-current links (they follow whatever the newest release is):
 | macOS · Apple Silicon | [`Anton-arm64.dmg`](https://github.com/saadhu-xyz/anton-releases/releases/latest/download/Anton-arm64.dmg) |
 | macOS · Intel | [`Anton-x86_64.dmg`](https://github.com/saadhu-xyz/anton-releases/releases/latest/download/Anton-x86_64.dmg) |
 | Linux · x86-64 | [`anton-linux-amd64.tar.gz`](https://github.com/saadhu-xyz/anton-releases/releases/latest/download/anton-linux-amd64.tar.gz) |
-| Linux · ARM64 | [`anton-linux-arm64.tar.gz`](https://github.com/saadhu-xyz/anton-releases/releases/latest/download/anton-linux-arm64.tar.gz) |
 
 To pin a specific version, swap `latest/download` for `download/<tag>` — e.g.
 `.../releases/download/v1.0.0/anton.apk`.
