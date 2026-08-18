@@ -74,8 +74,15 @@ sudo install anton anton-ticketing anton-impl-server /usr/local/bin/
 From a checkout of this repo, with the built artifacts on hand:
 
 ```sh
-./scripts/publish-release.sh v1.0.1 /path/to/artifacts/*
+./scripts/publish-release.sh v1.0.1 \
+  ../anton/mobile/build/app/outputs/flutter-apk/app-release.apk
 ```
 
-See the script for what it checks. It requires the `gh` CLI, authenticated as an
-account with write access here.
+Pass build outputs under whatever name the toolchain gave them — Flutter's
+`app-release.apk` is renamed to `anton.apk` on the way in, so the site's
+`latest/download/anton.apk` link keeps resolving. The script also refuses to
+clobber an existing tag, rejects two artifacts that would collide on one asset
+name, warns if a filename isn't one the website links to, and generates
+`SHA256SUMS`.
+
+Requires the `gh` CLI, authenticated as an account with write access here.

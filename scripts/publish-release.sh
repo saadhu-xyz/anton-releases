@@ -25,22 +25,43 @@ if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
   die "release $TAG already exists. Delete it first, or pick a new tag."
 fi
 
+# Toolchains name their output for the build, not for us: Flutter emits
+# `app-release.apk`, Go tarballs come out arch-suffixed, etc. The website links
+# to fixed filenames via `latest/download/<name>`, so normalize on the way in
+# rather than making every release depend on remembering to rename by hand.
+canonical_name() {
+  case "$1" in
+    app-release.apk|anton-release.apk) echo "anton.apk" ;;
+    app-arm64-v8a-release.apk)         echo "anton.apk" ;;
+    *)                                 echo "$1" ;;
+  esac
+}
+
 # Validate every artifact up front — no partial uploads.
 ARTIFACTS=()
+NAMES=()
 for f in "$@"; do
   [[ -f "$f" ]] || die "not a file: $f"
   [[ -s "$f" ]] || die "empty file: $f"
+  name=$(canonical_name "$(basename "$f")")
+
+  # Two inputs landing on one asset name would silently drop one upload.
+  for existing in ${NAMES[@]+"${NAMES[@]}"}; do
+    [[ "$existing" == "$name" ]] && die "two artifacts both map to '$name' — pass only one"
+  done
+
   ARTIFACTS+=("$f")
+  NAMES+=("$name")
 done
 
 # Warn on names the website's DOWNLOADS map doesn't expect. The `latest/download`
-# URLs are keyed on exact filenames, so a rename silently breaks the site.
+# URLs are keyed on exact filenames, so an unrecognized name silently breaks the
+# site. Checked after normalization, so a known rename is not flagged.
 KNOWN="anton.apk Anton-arm64.dmg Anton-x86_64.dmg anton-linux-amd64.tar.gz anton-linux-arm64.tar.gz"
-for f in "${ARTIFACTS[@]}"; do
-  base=$(basename "$f")
+for name in "${NAMES[@]}"; do
   case " $KNOWN " in
-    *" $base "*) ;;
-    *) echo "warning: '$base' is not a filename the website links to." >&2
+    *" $name "*) ;;
+    *) echo "warning: '$name' is not a filename the website links to." >&2
        echo "         expected one of: $KNOWN" >&2 ;;
   esac
 done
@@ -49,9 +70,16 @@ STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
 
 echo "Staging artifacts…"
-for f in "${ARTIFACTS[@]}"; do
-  cp "$f" "$STAGE/$(basename "$f")"
-  printf '  %-30s %s\n' "$(basename "$f")" "$(du -h "$f" | cut -f1)"
+for i in "${!ARTIFACTS[@]}"; do
+  f="${ARTIFACTS[$i]}"
+  name="${NAMES[$i]}"
+  base=$(basename "$f")
+  cp "$f" "$STAGE/$name"
+  if [[ "$base" == "$name" ]]; then
+    printf '  %-30s %s\n' "$name" "$(du -h "$f" | cut -f1)"
+  else
+    printf '  %-30s %s  (renamed from %s)\n' "$name" "$(du -h "$f" | cut -f1)" "$base"
+  fi
 done
 
 echo "Computing checksums…"
