@@ -93,7 +93,22 @@ Include only the targets you built — a release with just `--targetos android` 
 fine, and the other `latest/download` links keep pointing at whichever earlier
 release last published them.
 
+### Adding a platform to a release
+
+Builds finish on different machines at different times; the Mac DMGs can be
+hours behind the APK. Pass `--add` to upload into a release that already exists:
+
+```sh
+./scripts/publish-release.sh --add v1.0.1 \
+  --targetos android ../anton/mobile/build/app/outputs/flutter-apk/app-release.apk
+```
+
+`SHA256SUMS` is reissued to cover the new file *and* everything already
+published, so verification keeps working for every platform in the release.
+
 The script refuses to clobber an existing tag, rejects a platform given twice,
-and generates `SHA256SUMS` across everything it uploads.
+and — under `--add` — refuses to replace an asset that is already published.
+Swapping out a file people may already have downloaded stays a deliberate act:
+delete that asset by hand first, then re-add it.
 
 Requires the `gh` CLI, authenticated as an account with write access here.

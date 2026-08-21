@@ -10,6 +10,14 @@
 #       --targetos android     ../anton/mobile/build/app/outputs/flutter-apk/app-release.apk \
 #       --targetos macos-arm64 ../anton/packaging/macos/dist/Anton-arm64.dmg
 #
+# Platforms rarely finish building together — the Mac build can land hours after
+# the Android one, and each toolchain runs on its own machine. `--add` puts a
+# late artifact into a release that already exists, leaving the published assets
+# untouched and reissuing SHA256SUMS so it covers old and new alike:
+#
+#   ./scripts/publish-release.sh --add v1.0.1 \
+#       --targetos android ../anton/mobile/build/app/outputs/flutter-apk/app-release.apk
+#
 # Requires the `gh` CLI, authenticated with write access to this repo.
 set -euo pipefail
 
@@ -34,7 +42,10 @@ die() { echo "error: $*" >&2; exit 1; }
 
 usage() {
   cat >&2 <<EOF
-usage: $0 <tag> --targetos <os> <file> [--targetos <os> <file>...]
+usage: $0 [--add] <tag> --targetos <os> <file> [--targetos <os> <file>...]
+
+  --add   upload into an existing release instead of creating one, for a
+          platform whose build finished later
 
 target os values:
   android       published as anton.apk
@@ -43,14 +54,24 @@ target os values:
   macos-intel   published as Anton-x86_64.dmg
   linux-x86     published as anton-linux-amd64.tar.gz
 
-example:
+examples:
   $0 v1.0.1 --targetos android ../anton/mobile/build/app/outputs/flutter-apk/app-release.apk
+  $0 --add v1.0.1 --targetos macos-arm64 ../anton/packaging/macos/dist/Anton-arm64.dmg
 EOF
   exit 1
 }
 
 [[ $# -ge 1 ]] || usage
 case "$1" in --help|-h) usage ;; esac
+
+# Only accepted ahead of the tag. Later it would sit inside the `--targetos <os>
+# <file>` triples, where a stray flag is a typo worth rejecting rather than a
+# mode switch.
+ADD=false
+if [[ "$1" == "--add" ]]; then
+  ADD=true; shift
+fi
+
 [[ $# -ge 4 ]] || usage
 
 TAG="$1"; shift
@@ -100,13 +121,33 @@ else
   die "need sha256sum or shasum to checksum the artifacts"
 fi
 
-# Refuse to overwrite a published release by accident.
-if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
-  die "release $TAG already exists. Delete it first, or pick a new tag."
+if $ADD; then
+  gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1 \
+    || die "release $TAG does not exist — publish it first, without --add."
+
+  # Adding is strictly additive. Replacing a file people may already have
+  # downloaded is a deliberate act, not something that should happen as a side
+  # effect of uploading a sibling platform.
+  PUBLISHED=$(gh release view "$TAG" --repo "$REPO" --json assets --jq '.assets[].name')
+  for asset in "${ASSETS[@]}"; do
+    if grep -qxF "$asset" <<<"$PUBLISHED"; then
+      die "release $TAG already publishes $asset — delete that asset first, or pick a new tag."
+    fi
+  done
+else
+  # Refuse to overwrite a published release by accident.
+  if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+    die "release $TAG already exists. Delete it first, add to it with --add, or pick a new tag."
+  fi
 fi
 
-STAGE=$(mktemp -d)
-trap 'rm -rf "$STAGE"' EXIT
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+
+# Holds exactly what gets uploaded, so the upload can glob the directory. Working
+# files stay in $TMP alongside it, never in here.
+STAGE="$TMP/assets"
+mkdir "$STAGE"
 
 echo "Staging artifacts…"
 for i in "${!FILES[@]}"; do
@@ -116,22 +157,50 @@ for i in "${!FILES[@]}"; do
 done
 
 echo "Computing checksums…"
-# Two steps through a temp file rather than `sed -i` in place: BSD sed (macOS)
-# reads the expression as the backup suffix and fails with "invalid command
-# code", aborting the publish under `set -e` after staging but before the
-# release is created.
-#
-# Not a pipeline either. `sha256 ./* > FILE` is a simple command, so the shell
-# expands the glob before performing the redirection and the output file cannot
-# list itself. In a pipeline the glob and the redirect are set up in separately
-# forked processes, leaving that ordering to the shell's discretion.
-#
-# The `./` prefix guards a filename that begins with a dash; sed strips it back
-# off so the published SHA256SUMS names the assets plainly.
-( cd "$STAGE" \
-    && sha256 ./* > SHA256SUMS.tmp \
-    && sed 's|\./||' SHA256SUMS.tmp > SHA256SUMS \
-    && rm -f SHA256SUMS.tmp )
+# SHA256SUMS must name every asset in the release, not just the ones uploaded in
+# this run, or `-c` stops covering the platforms published earlier. Under --add
+# the existing file is the starting point: this script wrote it, so its lines are
+# already in the right format under the published asset names.
+PREVIOUS="$TMP/published.sums"
+: > "$PREVIOUS"
+if $ADD; then
+  # Whether the file is there is decided from the asset list already fetched, not
+  # from the exit status of the download. A network or auth failure would
+  # otherwise be indistinguishable from "this release has no SHA256SUMS", and the
+  # run would quietly publish a checksum file listing only the new artifact —
+  # dropping every platform released earlier.
+  if grep -qxF SHA256SUMS <<<"$PUBLISHED"; then
+    gh release download "$TAG" --repo "$REPO" --pattern SHA256SUMS --dir "$TMP" \
+      || die "could not download the published SHA256SUMS for $TAG"
+    mv "$TMP/SHA256SUMS" "$PREVIOUS"
+  else
+    echo "  no published SHA256SUMS to extend — writing a fresh one"
+  fi
+fi
+
+# Hashed from inside $STAGE so the file column is a bare asset name, and written
+# outside it so the output can never list itself. The `./` prefix guards a
+# filename that begins with a dash; sed strips it back off so the published
+# SHA256SUMS names the assets plainly. Matched after the two-space separator,
+# never anchored to the line start — each line begins with the hash, so `^\./`
+# matches nothing and the prefix ships to users. Not `sed -i` either: BSD sed
+# (macOS) reads the expression as a backup suffix and fails with "invalid
+# command code", aborting under `set -e` after staging but before any upload.
+( cd "$STAGE" && sha256 ./* > "$TMP/staged.sums" )
+sed 's|  \./|  |' "$TMP/staged.sums" > "$TMP/staged.clean"
+
+# Drop any published line naming a file being uploaded now, so the merge cannot
+# emit two lines for one asset. The guard above already rejects re-uploading a
+# published asset; this covers repairing a release whose asset was deleted by
+# hand while its checksum line stayed behind. A leading `./` is normalised away
+# first, so a line written by an older version of this script is still matched.
+# Asset names never contain spaces, which is what makes the membership test safe.
+awk -v staged=" ${ASSETS[*]} " '
+  { name = $2; sub(/^\.\//, "", name)
+    if (index(staged, " " name " ") == 0) print }
+' "$PREVIOUS" > "$TMP/previous.kept"
+
+sort -k2 "$TMP/previous.kept" "$TMP/staged.clean" > "$STAGE/SHA256SUMS"
 cat "$STAGE/SHA256SUMS"
 
 # Braced deliberately: macOS ships bash 3.2, which absorbs the leading byte of
@@ -139,11 +208,18 @@ cat "$STAGE/SHA256SUMS"
 # an unset `${TAG\xe2\x80\xa6}` and aborts under `set -u`, after the artifacts
 # are staged and checksummed but before the release is created. Newer bash on
 # Linux stops at the non-identifier byte, which is why this only bites on a Mac.
-echo "Creating release ${TAG}…"
-gh release create "$TAG" \
-  --repo "$REPO" \
-  --title "Anton $TAG" \
-  --notes "Anton $TAG
+if $ADD; then
+  echo "Uploading to ${TAG}…"
+  # --clobber is here for SHA256SUMS, which is replaced every time. The artifacts
+  # were checked against the published asset list above, so none of them can be
+  # silently overwriting anything.
+  gh release upload "$TAG" --repo "$REPO" --clobber "$STAGE"/*
+else
+  echo "Creating release ${TAG}…"
+  gh release create "$TAG" \
+    --repo "$REPO" \
+    --title "Anton $TAG" \
+    --notes "Anton $TAG
 
 Verify downloads against \`SHA256SUMS\`:
 
@@ -151,7 +227,8 @@ Verify downloads against \`SHA256SUMS\`:
     shasum -a 256 -c SHA256SUMS --ignore-missing # macOS
 
 macOS builds are unsigned — see the README for the Gatekeeper steps." \
-  "$STAGE"/*
+    "$STAGE"/*
+fi
 
 echo
 echo "Done: https://github.com/$REPO/releases/tag/$TAG"
