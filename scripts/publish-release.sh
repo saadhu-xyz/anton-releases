@@ -86,6 +86,20 @@ done
 command -v gh >/dev/null || die "gh CLI not found — https://cli.github.com"
 gh auth status >/dev/null 2>&1 || die "gh is not authenticated; run: gh auth login"
 
+# sha256sum is GNU coreutils. Linux has it; macOS ships `shasum` instead and
+# only recent builds carry a sha256sum at all, so pick whichever exists rather
+# than assuming. Both write and verify the same "<hash>  <file>" format, so the
+# SHA256SUMS produced here is checkable with either tool on either platform.
+# Resolved before any work happens, so a missing tool fails immediately instead
+# of after the artifacts are staged.
+if command -v sha256sum >/dev/null 2>&1; then
+  sha256() { sha256sum "$@"; }
+elif command -v shasum >/dev/null 2>&1; then
+  sha256() { shasum -a 256 "$@"; }
+else
+  die "need sha256sum or shasum to checksum the artifacts"
+fi
+
 # Refuse to overwrite a published release by accident.
 if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
   die "release $TAG already exists. Delete it first, or pick a new tag."
@@ -102,10 +116,30 @@ for i in "${!FILES[@]}"; do
 done
 
 echo "Computing checksums…"
-( cd "$STAGE" && sha256sum ./* > SHA256SUMS && sed -i 's|\./||' SHA256SUMS )
+# Two steps through a temp file rather than `sed -i` in place: BSD sed (macOS)
+# reads the expression as the backup suffix and fails with "invalid command
+# code", aborting the publish under `set -e` after staging but before the
+# release is created.
+#
+# Not a pipeline either. `sha256 ./* > FILE` is a simple command, so the shell
+# expands the glob before performing the redirection and the output file cannot
+# list itself. In a pipeline the glob and the redirect are set up in separately
+# forked processes, leaving that ordering to the shell's discretion.
+#
+# The `./` prefix guards a filename that begins with a dash; sed strips it back
+# off so the published SHA256SUMS names the assets plainly.
+( cd "$STAGE" \
+    && sha256 ./* > SHA256SUMS.tmp \
+    && sed 's|\./||' SHA256SUMS.tmp > SHA256SUMS \
+    && rm -f SHA256SUMS.tmp )
 cat "$STAGE/SHA256SUMS"
 
-echo "Creating release $TAG…"
+# Braced deliberately: macOS ships bash 3.2, which absorbs the leading byte of
+# the following multibyte character into the variable name — `$TAG…` parses as
+# an unset `${TAG\xe2\x80\xa6}` and aborts under `set -u`, after the artifacts
+# are staged and checksummed but before the release is created. Newer bash on
+# Linux stops at the non-identifier byte, which is why this only bites on a Mac.
+echo "Creating release ${TAG}…"
 gh release create "$TAG" \
   --repo "$REPO" \
   --title "Anton $TAG" \
@@ -113,7 +147,8 @@ gh release create "$TAG" \
 
 Verify downloads against \`SHA256SUMS\`:
 
-    sha256sum -c SHA256SUMS --ignore-missing
+    sha256sum -c SHA256SUMS --ignore-missing     # Linux
+    shasum -a 256 -c SHA256SUMS --ignore-missing # macOS
 
 macOS builds are unsigned — see the README for the Gatekeeper steps." \
   "$STAGE"/*
