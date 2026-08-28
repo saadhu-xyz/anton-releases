@@ -225,27 +225,45 @@ if [[ -x "$MANIFEST_GEN" ]]; then
   MANIFEST_ARGS=(--tag "$TAG" --assets "$STAGE" --out "$STAGE/latest.json"
                  --notes-url "https://github.com/$REPO/releases/tag/$TAG")
 
-  # Per-binary versions inside the Linux tarball, as
-  # "anton=v1.0.1,anton-ticketing=v1.0.2,...". The tarball ships all three
-  # services but they are released independently, so each is compared against
-  # its own entry — see make-release-manifest.sh --component.
-  if [[ -n "${ANTON_COMPONENTS:-}" ]]; then
-    IFS=',' read -ra _components <<<"$ANTON_COMPONENTS"
-    for c in "${_components[@]}"; do
-      [[ -n "$c" ]] && MANIFEST_ARGS+=(--component "$c")
-    done
-  fi
-
-  # Under --add the manifest is extended, not replaced: platforms this run did
-  # not rebuild keep the version and digest they were last published with. Same
-  # carry-forward as SHA256SUMS above, and decided the same way — from the asset
-  # list already fetched, so a download failure cannot masquerade as "there was
-  # no manifest" and silently drop every other platform.
-  if $ADD && grep -qxF latest.json <<<"$PUBLISHED"; then
-    if gh release download "$TAG" --repo "$REPO" --pattern latest.json --dir "$TMP"; then
-      MANIFEST_ARGS+=(--previous "$TMP/latest.json")
-    else
-      die "could not download the published latest.json for $TAG"
+  # The manifest is always extended, never replaced: platforms this run did not
+  # rebuild keep the version and digest they were last published with. Without
+  # that, a release publishing one platform would drop every other one from the
+  # manifest, and the updater treats an absent platform as "nothing to report"
+  # — so those hosts would silently believe they were up to date forever.
+  #
+  # Where the previous manifest comes from differs by mode:
+  #
+  #   --add   this same release, which already carries one. Same carry-forward
+  #           as SHA256SUMS above, and decided the same way — from the asset
+  #           list already fetched, so a download failure cannot masquerade as
+  #           "there was no manifest" and silently drop every other platform.
+  #
+  #   fresh   the release that is currently `latest`, i.e. the manifest clients
+  #           are being served right now. Read through the same `releases/latest`
+  #           view the updater uses, so what gets carried forward is exactly what
+  #           is currently authoritative rather than whatever sorted newest.
+  if $ADD; then
+    if grep -qxF latest.json <<<"$PUBLISHED"; then
+      if gh release download "$TAG" --repo "$REPO" --pattern latest.json --dir "$TMP"; then
+        MANIFEST_ARGS+=(--previous "$TMP/latest.json")
+      else
+        die "could not download the published latest.json for $TAG"
+      fi
+    fi
+  else
+    PREV_TAG="$(gh api "repos/$REPO/releases/latest" --jq .tag_name 2>/dev/null || true)"
+    if [[ -n "$PREV_TAG" ]]; then
+      if gh release download "$PREV_TAG" --repo "$REPO" --pattern latest.json --dir "$TMP" 2>/dev/null; then
+        echo "  carrying forward platforms from $PREV_TAG"
+        MANIFEST_ARGS+=(--previous "$TMP/latest.json")
+      else
+        # Not fatal: the first release after the manifest format was introduced
+        # legitimately has no predecessor to carry forward from. Loud, because
+        # every other time it means a platform is about to vanish.
+        echo "WARNING: $PREV_TAG publishes no latest.json — platforms it shipped" >&2
+        echo "         will be absent from this manifest, and hosts running them" >&2
+        echo "         will report themselves up to date. Re-add with --add." >&2
+      fi
     fi
   fi
 
