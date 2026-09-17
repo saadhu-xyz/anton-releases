@@ -256,6 +256,57 @@ else
   echo "         Set ANTON_REPO_ROOT to your anton checkout and re-run with --add." >&2
 fi
 
+# latest.json goes up last, and only once the artifacts it names are confirmed
+# to be on the release.
+#
+# It is the announcement: every updater reads it to decide what to download, so
+# publishing it alongside the artifacts means a partial upload advertises files
+# that are not there. v1.3.0 shipped exactly that — the manifest and SHA256SUMS
+# landed, both DMGs did not, and every Mac was then offered an update whose
+# download 404'd. The nine bytes it received were the string "Not Found".
+#
+# Holding it back makes a failed upload safe instead. A new release that never
+# gets its manifest answers 404 at /releases/latest/download/latest.json, which
+# updaters already report as "could not check for updates" and act on by doing
+# nothing; under --add the previous manifest simply stays authoritative. Both
+# leave every client working against artifacts that exist.
+MANIFEST_STAGED="$STAGE/latest.json"
+ARTIFACTS=()
+for f in "$STAGE"/*; do
+  [[ "$f" == "$MANIFEST_STAGED" ]] && continue
+  ARTIFACTS+=("$f")
+done
+[[ ${#ARTIFACTS[@]} -gt 0 ]] || die "nothing staged to upload"
+
+# Checks the outcome rather than the exit code. gh does report a failed upload,
+# but the release is equally broken by anything else that gets the manifest up
+# without its artifacts, so the question worth asking is whether the files are
+# actually there — at the size they were staged at, since a truncated upload is
+# the failure that looks most like success.
+verify_uploaded() {
+  local listing="$TMP/assets-after.json" f name want got bad=0
+  gh release view "$TAG" --repo "$REPO" --json assets > "$listing" \
+    || die "uploaded to $TAG, but could not list its assets to verify them"
+  for f in "${ARTIFACTS[@]}"; do
+    name="$(basename "$f")"
+    want="$(wc -c <"$f" | tr -d ' ')"
+    got="$(gh release view "$TAG" --repo "$REPO" --json assets \
+             --jq ".assets[] | select(.name==\"$name\") | .size" 2>/dev/null || true)"
+    if [[ -z "$got" ]]; then
+      echo "  missing from the release: $name" >&2
+      bad=1
+    elif [[ "$got" != "$want" ]]; then
+      echo "  wrong size: $name is $got bytes on the release, $want locally" >&2
+      bad=1
+    fi
+  done
+  if [[ "$bad" -ne 0 ]]; then
+    die "$TAG is missing artifacts, so latest.json was not published and no client will be offered this release.
+Re-run the same command, or upload the missing files by hand:
+  gh release upload $TAG --repo $REPO --clobber ${ARTIFACTS[*]}"
+  fi
+}
+
 # Braced deliberately: macOS ships bash 3.2, which absorbs the leading byte of
 # the following multibyte character into the variable name — `$TAG…` parses as
 # an unset `${TAG\xe2\x80\xa6}` and aborts under `set -u`, after the artifacts
@@ -266,7 +317,7 @@ if $ADD; then
   # --clobber is here for SHA256SUMS, which is replaced every time. The artifacts
   # were checked against the published asset list above, so none of them can be
   # silently overwriting anything.
-  gh release upload "$TAG" --repo "$REPO" --clobber "$STAGE"/*
+  gh release upload "$TAG" --repo "$REPO" --clobber "${ARTIFACTS[@]}"
 else
   echo "Creating release ${TAG}…"
   gh release create "$TAG" \
@@ -280,7 +331,15 @@ Verify downloads against \`SHA256SUMS\`:
     shasum -a 256 -c SHA256SUMS --ignore-missing # macOS
 
 macOS builds are unsigned — see the README for the Gatekeeper steps." \
-    "$STAGE"/*
+    "${ARTIFACTS[@]}"
+fi
+
+echo "Verifying ${TAG}'s artifacts…"
+verify_uploaded
+
+if [[ -f "$MANIFEST_STAGED" ]]; then
+  echo "Publishing latest.json…"
+  gh release upload "$TAG" --repo "$REPO" --clobber "$MANIFEST_STAGED"
 fi
 
 echo
