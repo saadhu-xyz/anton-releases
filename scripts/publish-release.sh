@@ -42,10 +42,13 @@ die() { echo "error: $*" >&2; exit 1; }
 
 usage() {
   cat >&2 <<EOF
-usage: $0 [--add] <tag> --targetos <os> <file> [--targetos <os> <file>...]
+usage: $0 [--add] <tag> [--notes-file <path>] --targetos <os> <file> [--targetos <os> <file>...]
 
-  --add   upload into an existing release instead of creating one, for a
-          platform whose build finished later
+  --add          upload into an existing release instead of creating one, for a
+                 platform whose build finished later
+  --notes-file   markdown to publish as the release body, above the
+                 verification steps. Not accepted with --add: that release's
+                 notes already exist
 
 target os values:
   android       published as anton.apk
@@ -79,9 +82,19 @@ TAG="$1"; shift
 
 # Parse repeated `--targetos <os> <file>` triples.
 OSES=(); FILES=(); ASSETS=()
+NOTES_FILE=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --help|-h)  usage ;;
+    # The release body, written by whoever cut the release. Accepted among the
+    # triples because that is where release.sh passes it, and consumed here so
+    # the rest of the loop still sees only --targetos.
+    --notes-file)
+      [[ $# -ge 2 ]] || die "--notes-file needs a path"
+      NOTES_FILE="$2"; shift 2
+      [[ -f "$NOTES_FILE" ]] || die "not a file: $NOTES_FILE"
+      [[ -s "$NOTES_FILE" ]] || die "empty notes file: $NOTES_FILE"
+      continue ;;
     --targetos) ;;
     *)          die "expected --targetos, got '$1'" ;;
   esac
@@ -103,6 +116,13 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ ${#FILES[@]} -gt 0 ]] || die "no artifacts given. Target os values: $TARGETS"
+
+# A release's notes are written when it is cut. An --add arrives hours later
+# with the same story behind it, and taking notes here would overwrite whatever
+# the release says now, including edits made on GitHub since.
+if $ADD && [[ -n "$NOTES_FILE" ]]; then
+  die "--notes-file cannot be used with --add; edit the release's notes on GitHub"
+fi
 
 command -v gh >/dev/null || die "gh CLI not found — https://cli.github.com"
 gh auth status >/dev/null 2>&1 || die "gh is not authenticated; run: gh auth login"
@@ -338,17 +358,31 @@ if $ADD; then
   gh release upload "$TAG" --repo "$REPO" --clobber "${ARTIFACTS[@]}"
 else
   echo "Creating release ${TAG}…"
-  gh release create "$TAG" \
-    --repo "$REPO" \
-    --title "Anton $TAG" \
-    --notes "Anton $TAG
-
+  # What the release says: the notes written for it, when any were, above the
+  # verification steps every release carries. Without notes the body is what it
+  # always was, so a release cut by hand still reads correctly.
+  BODY="$(mktemp)"
+  trap 'rm -f "$BODY"' EXIT
+  {
+    if [[ -n "$NOTES_FILE" ]]; then
+      cat "$NOTES_FILE"
+      printf '\n---\n\n'
+    else
+      printf 'Anton %s\n\n' "$TAG"
+    fi
+    cat <<EOF
 Verify downloads against \`SHA256SUMS\`:
 
     sha256sum -c SHA256SUMS --ignore-missing     # Linux
     shasum -a 256 -c SHA256SUMS --ignore-missing # macOS
 
-macOS builds are unsigned — see the README for the Gatekeeper steps." \
+macOS builds are unsigned — see the README for the Gatekeeper steps.
+EOF
+  } >"$BODY"
+  gh release create "$TAG" \
+    --repo "$REPO" \
+    --title "Anton $TAG" \
+    --notes-file "$BODY" \
     "${ARTIFACTS[@]}"
 fi
 
