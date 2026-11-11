@@ -8,6 +8,12 @@ resolve for anyone, without making the application repository public. Everything
 ships as **release assets** — nothing binary is committed to git, so cloning this
 repo stays instant no matter how many builds accumulate.
 
+## Technical disclosures
+
+[Driving a terminal AI coding agent from a phone](disclosures/2026-11-anton-agent-techniques.md)
+(November 2026): a defensive publication of the techniques behind Anton, published
+as prior art and free for anyone to use.
+
 ## Downloads
 
 Always-current links (they follow whatever the newest release is):
